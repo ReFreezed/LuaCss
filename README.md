@@ -4,8 +4,8 @@ CSS tokenizing and minimizing library for Lua 5.1. No external dependencies - on
 
 - [Usage](#usage)
 - [API](#api)
-- [Token Format](#tokenformat)
-	- [Token Types](#tokentypes)
+- [Token Format](#token-format)
+	- [Token Types](#token-types)
 
 
 
