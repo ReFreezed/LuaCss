@@ -30,16 +30,33 @@
 --=
 --==============================================================
 
-	API:
 
-	tokenize
-		cssTokens = tokenize( cssString )
-
-	serializeAndMinimize
-		cssString = serializeAndMinimize( cssTokens [, strictErrors=false ] )
+	API
+	--------------------------------
 
 	minimize
-		cssString = minimize( cssString [, strictErrors=false ] )
+		cssString = minimize( cssString [, options ] )
+		tokens    = minimize( tokens    [, options ] )
+
+	serialize
+		cssString = serialize( tokens [, options ] )
+
+	serializeAndMinimize
+		cssString = serializeAndMinimize( tokens [, options ] )
+
+	tokenize
+		tokens = tokenize( cssString )
+
+
+	Options
+	--------------------------------
+
+	autoZero
+		Convert '0px' and '0%' etc. to a simple '0' during minification.
+
+	strict
+		Trigger an error when a badString or badUrl token is encountered during minification.
+
 
 --============================================================]]
 
@@ -67,7 +84,9 @@ local CHAR_REPLACE      = "\239\191\189"
 local path = ("."..assert(...,"Needs module path.")):gsub("[^.]+$","")
 local utf8 = require((path.."utf8"):sub(2))
 
-local css = {}
+local F = string.format
+
+local css = {VERSION="0.1.0"}
 
 
 
@@ -79,7 +98,10 @@ local findEnd
 local getKeys
 local indexOf
 local inRange
+local isAny
 local isValidCodepoint, isControlCharacterCodepoint, isSurrogateCodepoint
+local makeString
+local newTokenComment, newTokenWhitespace, newTokenNumber
 local printobj
 local sort
 local sortNatural, compareNatural
@@ -174,7 +196,7 @@ end
 -- array = sortNatural( array [, attribute ] )
 do
 	local function pad(numStr)
-		return ("%03d%s"):format(#numStr, numStr)
+		return F("%03d%s", #numStr, numStr)
 	end
 	function compareNatural(a, b)
 		return tostring(a):gsub("%d+", pad) < tostring(b):gsub("%d+", pad)
@@ -263,6 +285,77 @@ end
 function findEnd(s, ...)
 	local _, i = s:find(...)
 	return i
+end
+
+
+
+do
+	local UNPACK_LIMIT = 8000
+	local chars = {}
+
+	function makeString(cps)
+		if not cps[UNPACK_LIMIT] then
+			return utf8.char(unpack(cps))
+		end
+
+		local toChar = utf8.char
+
+		for i = 1, #cps do
+			chars[i] = toChar(cps[i])
+			assert(#chars[i] == 1)
+		end
+
+		return table.concat(chars, "", 1, #cps)
+	end
+
+	--[[ Test limit of unpack(). (Is this always the same though?)
+	for i = 1, math.huge do
+		chars[i] = true
+		if not pcall(unpack, chars) then
+			print("Max unpacks: "..i)
+			os.exit(1)
+		end
+	end
+	--]]
+end
+
+
+
+-- token = newTokenComment( [ comment="" ] )
+function newTokenComment(comment)
+	local token = {type="comment"}
+	token.value = comment or ""
+	return token
+end
+
+-- token = newTokenWhitespace( [ value="" ] )
+function newTokenWhitespace(value)
+	local token = {type="whitespace"}
+	token.value = value or ""
+	return token
+end
+
+-- token = newTokenNumber( [ number=0, numberRepresentation=auto, numberType=auto ] )
+function newTokenNumber(n, nRepr, nType)
+	local token = {type="number"}
+
+	n     = n or 0
+	nRepr = nRepr or F("%g ", n)
+
+	token.representation = nRepr
+	token.value          = n
+	token.numberType     = nType  or nRepr:find"[^%d]" and "number"  or "integer"
+
+	return token
+end
+
+
+
+function isAny(v, ...)
+	for i = 1, select("#", ...) do
+		if v == select(i, ...) then  return true  end
+	end
+	return false
 end
 
 
@@ -357,7 +450,7 @@ function matchAlphaOrNonAscii(s, ptr)
 	if s:find("^[%a_]", ptr) then  return ptr, ptr  end
 
 	local cp = utf8.codepoint(s, 1, 1, ptr)
-	if not cp or cp < CP_NONASCII_START then  return nil, nil  end
+	if not cp or cp < CP_NONASCII_START then  return nil  end
 
 	return ptr, ptr+utf8.charlen(s, ptr)-1
 end
@@ -390,7 +483,8 @@ function consumeNumericToken(s, ptr)
 		ptr = ptr+1
 
 	else
-		token = {type="number"}
+		token = newTokenNumber(n, nRepr, nType)
+		return token, ptr
 	end
 
 	token.representation = nRepr
@@ -429,7 +523,7 @@ function consumeStringToken(s, ptr, quoteChar)
 	while true do
 		if ptr > #s or substrCompareAsciiChar(s, ptr, quoteChar) then
 			local token = {type="string"}
-			token.value          = utf8.char(unpack(cps))
+			token.value          = makeString(cps)
 			token.quoteCharacter = quoteChar
 			return token, ptr+1
 
@@ -496,6 +590,11 @@ function consumeUrlToken(s, ptr)
 			local token = {type="url"}
 			token.value          = strToken.value
 			token.quoteCharacter = quoteChar
+
+			if token.value:find"^data:image/jpeg;base64," then
+				token.value = token.value:gsub("%s+", "")
+			end
+
 			return token, ptr+1
 
 		else
@@ -510,7 +609,7 @@ function consumeUrlToken(s, ptr)
 	while true do
 		if ptr > #s or substrCompareAsciiChar(s, ptr, ")") then
 			local token = {type="url"}
-			token.value          = utf8.char(unpack(cps))
+			token.value          = makeString(cps)
 			token.quoteCharacter = ""
 			return token, ptr+1
 
@@ -520,7 +619,7 @@ function consumeUrlToken(s, ptr)
 
 			if ptr > #s or substrCompareAsciiChar(s, ptr, ")") then
 				local token = {type="url"}
-				token.value          = utf8.char(unpack(cps))
+				token.value          = makeString(cps)
 				token.quoteCharacter = ""
 				return token, ptr+1
 
@@ -649,7 +748,7 @@ function consumeName(s, ptr)
 			table.insert(cps, cp)
 
 		else
-			return utf8.char(unpack(cps)), ptr
+			return makeString(cps), ptr
 		end
 
 	end
@@ -730,9 +829,7 @@ function consumeComment(s, ptr)
 		ptr = #s+1
 	end
 
-	local token = {type="comment"}
-	token.value = comment
-
+	token = newTokenComment(comment)
 	return token, ptr
 end
 
@@ -950,7 +1047,7 @@ function css.tokenize(s)
 			end
 
 		--------------------------------
-		elseif isNameStart(c1, 1) then
+		elseif isNameStart(s, ptr) then
 			token, ptr = consumeIdentLikeToken(s, ptr)
 
 		--------------------------------
@@ -975,9 +1072,8 @@ end
 --= Serializer =================================================
 --==============================================================
 
+local canTrimBeforeNextToken
 local formatNumberFromToken
-local getNextToken, getNextNonWsToken, getNextNonWsOrSemicolonToken
-local mustSeparateTokens
 
 
 
@@ -985,7 +1081,7 @@ function formatNumberFromToken(token)
 	local n    = token.value
 	local repr = token.representation:gsub("^%+", "")
 
-	local nStr = ("%.10g"):format(n)
+	local nStr = F("%.10g", n)
 	if #nStr > #repr or tonumber(nStr) ~= n then  nStr = repr  end
 
 	nStr = nStr:gsub("0%.", ".")
@@ -994,175 +1090,25 @@ end
 
 
 
-function mustSeparateTokens(a, b)
-	local at, av = a.type, a.value
-	local bt, bv = b.type, b.value
-	return
-		(at == "ident" and (
-			bt == "ident"               or
-			bt == "function"            or
-			bt == "url"                 or
-			bt == "badUrl"              or
-			-- bt == "delim" and bv == "-" or -- :W3cVal
-			bt == "number"              or
-			bt == "percentage"          or
-			bt == "dimension"           or
-			bt == "unicodeRange"        or
-			bt == "cdc"                 or
-			bt == "("
-		))
-		or (at == "atKeyword" and (
-			bt == "ident"               or
-			bt == "function"            or
-			bt == "url"                 or
-			bt == "badUrl"              or
-			-- bt == "delim" and bv == "-" or -- :W3cVal
-			bt == "number"              or
-			bt == "percentage"          or
-			bt == "dimension"           or
-			bt == "unicodeRange"        or
-			bt == "cdc"
-		))
-		or (at == "hash" and (
-			bt == "ident"               or
-			bt == "function"            or
-			bt == "url"                 or
-			bt == "badUrl"              or
-			-- bt == "delim" and bv == "-" or -- :W3cVal
-			bt == "number"              or
-			bt == "percentage"          or
-			bt == "dimension"           or
-			bt == "unicodeRange"        or
-			bt == "cdc"                 or
-			bt == "("
-		))
-		or (at == "dimension" and (
-			bt == "ident"               or
-			bt == "function"            or
-			bt == "url"                 or
-			bt == "badUrl"              or
-			-- bt == "delim" and bv == "-" or -- :W3cVal
-			bt == "number"              or
-			bt == "percentage"          or
-			bt == "dimension"           or
-			bt == "unicodeRange"        or
-			bt == "cdc"                 or
-			bt == "("
-		))
-		or (at == "delim" and av == "#" and (
-			bt == "ident"               or
-			bt == "function"            or
-			bt == "url"                 or
-			bt == "badUrl"              or
-			-- bt == "delim" and bv == "-" or -- :W3cVal
-			bt == "number"              or
-			bt == "percentage"          or
-			bt == "dimension"           or
-			bt == "unicodeRange"
-		))
-		-- or (at == "delim" and av == "-" and ( -- :W3cVal
-		-- 	bt == "ident"               or
-		-- 	bt == "function"            or
-		-- 	bt == "url"                 or
-		-- 	bt == "badUrl"              or
-		-- 	bt == "number"              or
-		-- 	bt == "percentage"          or
-		-- 	bt == "dimension"           or
-		-- 	bt == "unicodeRange"
-		-- ))
-		or (at == "number" and (
-			bt == "ident"               or
-			bt == "function"            or
-			bt == "url"                 or
-			bt == "badUrl"              or
-			bt == "number"              or
-			bt == "percentage"          or
-			bt == "dimension"           or
-			bt == "unicodeRange"
-		))
-		or (at == "delim" and av == "@" and (
-			bt == "ident"               or
-			bt == "function"            or
-			bt == "url"                 or
-			bt == "badUrl"              or
-			-- bt == "delim" and bv == "-" or -- :W3cVal
-			bt == "unicodeRange"
-		))
-		or (at == "unicodeRange" and (
-			bt == "ident"               or
-			bt == "function"            or
-			bt == "number"              or
-			bt == "percentage"          or
-			bt == "dimension"           or
-			bt == "delim" and bv == "?"
-		))
-		or (at == "delim" and av == "." and (
-			bt == "number"              or
-			bt == "percentage"          or
-			bt == "dimension"
-		))
-		-- or (at == "delim" and av == "+" and ( -- :W3cVal
-		-- 	bt == "number"              or
-		-- 	bt == "percentage"          or
-		-- 	bt == "dimension"
-		-- ))
+function canTrimBeforeNextToken(tokens, i)
+	local token = tokens[i+1]
+	if not token then  return true  end
 
-		or (at == "delim" and bt == "delim" and (
-			av == "$" and bv == "="     or
-			av == "*" and bv == "="     or
-			av == "^" and bv == "="     or
-			av == "~" and bv == "="     or
-			av == "|" and bv == "="     or
-			av == "|" and bv == "|"     or
-			av == "/" and bv == "*"
-		))
-
-		-- Silence the W3C CSS validator. :W3cVal
-		or (at == "delim" and (av == "+" or av == "-"))
-		or (bt == "delim" and (bv == "+" or bv == "-"))
+	return not isAny(token.type, "ident","function","url","badUrl","number","percentage","dimension","unicodeRange")
 end
 
 
 
-function getNextToken(tokens, i, dir)
-	for i = i+dir, (dir < 0 and 1 or #tokens), dir do
-		local token = tokens[i]
-
-		if token.type ~= "comment" then
-			return token, i
-		end
-	end
-
-	return nil
-end
-
-function getNextNonWsToken(tokens, i, dir)
-	for i = i+dir, (dir < 0 and 1 or #tokens), dir do
-		local token = tokens[i]
-
-		if token.type ~= "comment" and token.type ~= "whitespace" then
-			return token, i
-		end
-	end
-
-	return nil
-end
-
-function getNextNonWsOrSemicolonToken(tokens, i, dir)
-	for i = i+dir, (dir < 0 and 1 or #tokens), dir do
-		local token = tokens[i]
-
-		if token.type ~= "comment" and token.type ~= "whitespace" and token.type ~= "semicolon" then
-			return token, i
-		end
-	end
-
-	return nil
+function css.serializeAndMinimize(tokens, options)
+	options = options or {}
+	return css.serialize(css.minimize(tokens, options), options)
 end
 
 
 
-function css.serializeAndMinimize(tokens, strict)
+function css.serialize(tokens, options)
+	options = options or {}
+
 	local out = {}
 
 	local function write(v)
@@ -1170,7 +1116,7 @@ function css.serializeAndMinimize(tokens, strict)
 	end
 
 	-- https://drafts.csswg.org/cssom/#serialize-an-identifier
-	local function writeName(v, unrestricted)
+	local function writeName(v, unrestricted, trimTrailingSpace)
 		local cps     = {}
 		local firstCp = nil
 
@@ -1191,7 +1137,7 @@ function css.serializeAndMinimize(tokens, strict)
 					and inRange(cp, CP_0, CP_9)
 				)
 			then
-				local escape = ("\\%X "):format(cp)
+				local escape = F("\\%X ", cp)
 				for i = 1, #escape do
 					table.insert(cps, escape:byte(i))
 				end
@@ -1216,20 +1162,29 @@ function css.serializeAndMinimize(tokens, strict)
 			end
 		end
 
-		write(utf8.char(unpack(cps)))
+		if trimTrailingSpace and cps[#cps] == 32 then
+			table.remove(cps)
+		end
+
+		write(makeString(cps))
 	end
 
 	-- https://drafts.csswg.org/cssom/#serialize-a-string
-	function writeString(v)
-		local hasDouble = v:find('"', 1, true) ~= nil
-		local hasSingle = v:find("'", 1, true) ~= nil
-		local quoteChar = hasDouble and not hasSingle and "'" or '"'
+	function writeString(v, quoteChar)
+		if not quoteChar then
+			-- http://tantek.com/CSS/Examples/boxmodelhack.html#content
+			local ie5ParsingBugExploitQuoteChar = v:match"^([\"']).+[\"']$"
+
+			local hasDouble = v:find('"', 1, true) ~= nil
+			local hasSingle = v:find("'", 1, true) ~= nil
+			quoteChar = ie5ParsingBugExploitQuoteChar or hasDouble and not hasSingle and "'" or '"'
+		end
 
 		v = v
 			:gsub("%z", CHAR_REPLACE)
 			:gsub("["..quoteChar.."\\]", "\\%0")
 			:gsub("[\1-\31]", function(c)
-				return ("\\%X "):format(c:byte())
+				return F("\\%X ", c:byte())
 			end)
 
 		write(quoteChar)
@@ -1240,9 +1195,9 @@ function css.serializeAndMinimize(tokens, strict)
 	function writePlainUrlValue(v)
 		v = v
 			:gsub("%z", CHAR_REPLACE)
-			:gsub("\\", "\\\\")
+			:gsub("[\\ ()\"']", "\\%0")
 			:gsub("[\1-\31]", function(c)
-				return ("\\%X "):format(c:byte())
+				return F("\\%X ", c:byte())
 			end)
 
 		write(v)
@@ -1250,43 +1205,35 @@ function css.serializeAndMinimize(tokens, strict)
 
 	for i, token in ipairs(tokens) do
 		if token.type == "dimension" then
-			if token.value == 0 then
-				write("0")
-			else
-				local nRepr = formatNumberFromToken(token)
-				write(nRepr)
+			local nRepr = formatNumberFromToken(token)
+			write(nRepr)
 
-				-- Eliminate ambiguity with scientific notation.
-				if not nRepr:find("n", 2, true) and token.unit:find"^[Ee][-+]?%d" then
-					write("e0") -- W3C CSS validator still complains...
-				end
-
-				writeName(token.unit)
+			-- Eliminate ambiguity with scientific notation.
+			if not nRepr:find("n", 2, true) and token.unit:find"^[Ee][-+]?%d" then
+				write("e0") -- W3C CSS validator still complains...
 			end
+
+			writeName(token.unit, false, canTrimBeforeNextToken(tokens, i))
 
 		elseif token.type == "percentage" then
-			if token.value == 0 then
-				write("0")
-			else
-				write(formatNumberFromToken(token))
-				write("%")
-			end
+			write(formatNumberFromToken(token))
+			write("%")
 
 		elseif token.type == "number" then
 			write(formatNumberFromToken(token))
 
 		elseif token.type == "function" then
-			writeName(token.value)
+			writeName(token.value, false, true)
 			write("(")
 
 		elseif token.type == "ident" then
-			writeName(token.value)
+			writeName(token.value, false, canTrimBeforeNextToken(tokens, i))
 
 		elseif token.type == "string" then
-			writeString(token.value)
+			writeString(token.value, (options.preserveQuotes and token.quoteCharacter or nil))
 
 		elseif token.type == "badString" then
-			if strict then
+			if options.strict then
 				error("[css] BAD_STRING token at position "..i..".")
 			else
 				print("[css] Warning: BAD_STRING token at position "..i..".")
@@ -1297,7 +1244,14 @@ function css.serializeAndMinimize(tokens, strict)
 			local v = token.value
 			write("url(")
 
-			if v == "" then
+			if options.preserveQuotes then
+				if token.quoteCharacter ~= "" then
+					writeString(v, token.quoteCharacter)
+				elseif v ~= "" then
+					writePlainUrlValue(v)
+				end
+
+			elseif v == "" then
 				-- void
 
 			elseif v:find"[ ()\"']" then
@@ -1313,7 +1267,7 @@ function css.serializeAndMinimize(tokens, strict)
 			write(")")
 
 		elseif token.type == "badUrl" then
-			if strict then
+			if options.strict then
 				error("[css] BAD_URL token at position "..i..".")
 			else
 				print("[css] Warning: BAD_URL token at position "..i..".")
@@ -1321,8 +1275,8 @@ function css.serializeAndMinimize(tokens, strict)
 			end
 
 		elseif token.type == "unicodeRange" then
-			local from = ("%X"):format(token.from)
-			local to   = ("%X"):format(token.to)
+			local from = F("%X", token.from)
+			local to   = F("%X", token.to)
 
 			local preFrom = from :gsub("0+$", "")
 			local preTo   = to   :gsub("F+$", "")
@@ -1345,36 +1299,18 @@ function css.serializeAndMinimize(tokens, strict)
 				write(to)
 			end
 
-
 		elseif token.type == "whitespace" then
-
-			-- Note: There shouldn't ever be two whitespace tokens after
-			-- each other (I think), but there could be two or more
-			-- whitespace tokens with comments in-between.
-			local tokenPrev = getNextToken(tokens, i, -1)
-			local tokenNext = getNextNonWsToken(tokens, i, 1)
-
-			if tokenPrev and tokenNext and mustSeparateTokens(tokenPrev, tokenNext) then
-				write(" ")
-			end
+			write(token.value)
 
 		elseif token.type == "comment" then
-			local tokenPrev = getNextToken(tokens, i, -1) -- Could be whitespace.
-
-			if substrCompareAsciiChar(token.value, 1, "!") then
-				write("/*")
-				write(token.value)
-				write("*/")
-
-			-- Child selector hack for IE7 and below.
-			-- html >/**/ body p {
-			elseif tokenPrev and tokenPrev.type == "delim" and tokenPrev.value == ">" then
-				write("/**/")
-			end
+			assert(not token.value:find"%*/")
+			write("/*")
+			write(token.value)
+			write("*/")
 
 		elseif token.type == "hash" then
 			write("#")
-			writeName(token.value, (token.idType == "unrestricted"))
+			writeName(token.value, (token.idType == "unrestricted"), canTrimBeforeNextToken(tokens, i))
 
 		elseif token.type == "suffixMatch" then
 			write("$=")
@@ -1397,15 +1333,7 @@ function css.serializeAndMinimize(tokens, strict)
 			write(":")
 
 		elseif token.type == "semicolon" then
-			local tokenPrev = getNextNonWsOrSemicolonToken(tokens, i, -1)
-			local tokenNext = getNextNonWsToken(tokens, i,  1)
-
-			if
-				tokenNext and tokenNext.type ~= "}" and tokenNext.type ~= "semicolon"
-				and not (tokenPrev and tokenPrev.type == "{")
-			then
-				write(";")
-			end
+			write(";")
 
 		elseif token.type == "cdo" then
 			write("<!--")
@@ -1414,7 +1342,7 @@ function css.serializeAndMinimize(tokens, strict)
 
 		elseif token.type == "atKeyword" then
 			write("@")
-			writeName(token.value)
+			writeName(token.value, false, canTrimBeforeNextToken(tokens, i))
 
 		elseif token.type == "(" or token.type == ")" then
 			write(token.type)
@@ -1425,7 +1353,6 @@ function css.serializeAndMinimize(tokens, strict)
 
 		elseif token.type == "delim" then
 			write(token.value)
-
 			if token.value == "\\" then  write("\n")  end
 
 		else
@@ -1439,13 +1366,669 @@ end
 
 
 --==============================================================
---= Additionals ================================================
+--= Minimizer ==================================================
 --==============================================================
 
+local getNextToken, getNextNonWsToken, getNextNonWsOrSemicolonToken
+local isPreceededBy
+local mustSeparateTokens
 
 
-function css.minimize(s, strict)
-	return css.serializeAndMinimize(css.tokenize(s), strict)
+
+function mustSeparateTokens(a, b, isInRule)
+	local at, av = a.type, a.value
+	local bt, bv = b.type, b.value
+	return
+		at == "ident" and (
+			bt == "ident"               or
+			bt == "function"            or
+			bt == "url"                 or
+			bt == "badUrl"              or
+			-- bt == "delim" and bv == "-" or -- :W3cVal
+			bt == "number"              or
+			bt == "percentage"          or
+			bt == "dimension"           or
+			bt == "unicodeRange"        or
+			bt == "cdc"                 or
+			bt == "("                   or
+			not isInRule and ( -- :SpacingFix
+				bt == "hash"  or
+				bt == "colon" or
+				bt == "delim" and bv == "."
+			)
+		)
+		or at == "atKeyword" and (
+			bt == "ident"               or
+			bt == "function"            or
+			bt == "url"                 or
+			bt == "badUrl"              or
+			-- bt == "delim" and bv == "-" or -- :W3cVal
+			bt == "number"              or
+			bt == "percentage"          or
+			bt == "dimension"           or
+			bt == "unicodeRange"        or
+			bt == "cdc"
+		)
+		or at == "hash" and (
+			bt == "ident"               or
+			bt == "function"            or
+			bt == "url"                 or
+			bt == "badUrl"              or
+			-- bt == "delim" and bv == "-" or -- :W3cVal
+			bt == "number"              or
+			bt == "percentage"          or
+			bt == "dimension"           or
+			bt == "unicodeRange"        or
+			bt == "cdc"                 or
+			bt == "("                   or
+			not isInRule and ( -- :SpacingFix
+				bt == "hash"  or
+				bt == "colon" or
+				bt == "delim" and bv == "."
+			)
+		)
+		or at == "dimension" and (
+			bt == "ident"               or
+			bt == "function"            or
+			bt == "url"                 or
+			bt == "badUrl"              or
+			-- bt == "delim" and bv == "-" or -- :W3cVal
+			bt == "number"              or
+			bt == "percentage"          or
+			bt == "dimension"           or
+			bt == "unicodeRange"        or
+			bt == "cdc"                 or
+			bt == "("
+		)
+		or at == "delim" and av == "#" and (
+			bt == "ident"               or
+			bt == "function"            or
+			bt == "url"                 or
+			bt == "badUrl"              or
+			-- bt == "delim" and bv == "-" or -- :W3cVal
+			bt == "number"              or
+			bt == "percentage"          or
+			bt == "dimension"           or
+			bt == "unicodeRange"
+		)
+		-- or at == "delim" and av == "-" and ( -- :W3cVal
+		-- 	bt == "ident"               or
+		-- 	bt == "function"            or
+		-- 	bt == "url"                 or
+		-- 	bt == "badUrl"              or
+		-- 	bt == "number"              or
+		-- 	bt == "percentage"          or
+		-- 	bt == "dimension"           or
+		-- 	bt == "unicodeRange"
+		-- )
+		or at == "number" and (
+			bt == "ident"               or
+			bt == "function"            or
+			bt == "url"                 or
+			bt == "badUrl"              or
+			bt == "number"              or
+			bt == "percentage"          or
+			bt == "dimension"           or
+			bt == "unicodeRange"
+		)
+		or at == "delim" and av == "@" and (
+			bt == "ident"               or
+			bt == "function"            or
+			bt == "url"                 or
+			bt == "badUrl"              or
+			-- bt == "delim" and bv == "-" or -- :W3cVal
+			bt == "unicodeRange"
+		)
+		or at == "unicodeRange" and (
+			bt == "ident"               or
+			bt == "function"            or
+			bt == "number"              or
+			bt == "percentage"          or
+			bt == "dimension"           or
+			bt == "delim" and bv == "?"
+		)
+		or at == "delim" and av == "." and (
+			bt == "number"              or
+			bt == "percentage"          or
+			bt == "dimension"
+		)
+		-- or at == "delim" and av == "+" and ( -- :W3cVal
+		-- 	bt == "number"              or
+		-- 	bt == "percentage"          or
+		-- 	bt == "dimension"
+		-- )
+		or not isInRule and ( -- :SpacingFix
+			at == "]" and (
+				bt == "ident"
+			)
+		)
+
+		or at == "delim" and bt == "delim" and (
+			av == "$" and bv == "=" or
+			av == "*" and bv == "=" or
+			av == "^" and bv == "=" or
+			av == "~" and bv == "=" or
+			av == "|" and bv == "=" or
+			av == "|" and bv == "|" or
+			av == "/" and bv == "*"
+		)
+
+		-- Silence the W3C CSS validator. :W3cVal
+		or at == "delim" and (av == "+" or av == "-")
+		or bt == "delim" and (bv == "+" or bv == "-")
+end
+
+
+
+function getNextToken(tokens, i, dir)
+	for i = i, (dir < 0 and 1 or #tokens), dir do
+		local token = tokens[i]
+
+		if token.type ~= "comment" then
+			return token, i
+		end
+	end
+
+	return nil
+end
+
+function getNextNonWsToken(tokens, i, dir)
+	for i = i, (dir < 0 and 1 or #tokens), dir do
+		local token = tokens[i]
+
+		if token.type ~= "comment" and token.type ~= "whitespace" then
+			return token, i
+		end
+	end
+
+	return nil
+end
+
+function getNextNonWsOrSemicolonToken(tokens, i, dir)
+	for i = i, (dir < 0 and 1 or #tokens), dir do
+		local token = tokens[i]
+
+		if token.type ~= "comment" and token.type ~= "whitespace" and token.type ~= "semicolon" then
+			return token, i
+		end
+	end
+
+	return nil
+end
+
+
+
+-- bool = isPreceededBy( tokens, tokIndex, matchSequence... )
+-- Match sequences:
+--  * [ doNotMatch=="!" ], tokenType
+--  * [ doNotMatch=="!" ], tokenType=="atKeyword", tokenValue
+--  * [ doNotMatch=="!" ], tokenType=="delim",     tokenValue
+--  * [ doNotMatch=="!" ], tokenType=="ident",     tokenValue
+-- Note that the traversal is going backwards.
+local function isPreceededBy(tokens, tokIndex, ...)
+	local argCount = select("#", ...)
+	local argIndex = 1
+
+	print("~~~~~~~~~~~~~~~~~~~~~~~~")
+	print("isPreceededBy", argCount, "|", ...)
+
+	while argIndex <= argCount do
+		local token = tokens[tokIndex]
+		if not token then  return false  end
+
+		print("arg "..argIndex)
+
+		if token.type ~= "comment" then
+			local tokType = select(argIndex, ...)
+			argIndex = argIndex+1
+
+			local wantMatch = true
+			if tokType == "!" then
+				wantMatch = false
+
+				tokType = select(argIndex, ...)
+				argIndex = argIndex+1
+			end
+
+			print(wantMatch and "want:typ  " or "nowant:typ", tokType)
+			print("got:typ", token.type)
+
+			if (token.type == tokType) ~= wantMatch then
+				print("nope")
+				return false
+			end
+
+			if isAny(tokType, "ident","delim","atKeyword") then
+				print(wantMatch and "want:val  " or "nowant:val", select(argIndex, ...))
+				print("got:val", token.value)
+				if (token.value == select(argIndex, ...)) ~= wantMatch then
+					print("nope")
+					return false
+				end
+
+				argIndex = argIndex+1
+			end
+		end
+
+		tokIndex = tokIndex-1
+	end
+
+	print("YYEEESSS")
+	return true
+end
+
+
+
+-- css    = minimize( css    [, options ] )
+-- tokens = minimize( tokens [, options ] )
+function css.minimize(tokensIn, options)
+	-- @Incomplete:
+	-- * Less prop values:
+	--      "background-position:0 0 0 0"  =>  "background-position:0 0"
+	--      "margin:0 0 0 0"  =>  "margin:0"
+	-- * No empty rules:  "body div{}"  =>  ""
+	-- * Simplify rgb colors:  "rgb(123,123,123)"  =>  "#7b7b7b"
+	-- * Simplify opacity in colors:  "hsla(0,0,0,1)"/"rgba(0,0,0,1)"  => "hsla(0,0,0)"/"rgba(0,0,0)"
+	-- * Unstring font names, if possible:  '"Arial"'  =>  'Arial'
+	-- * Omit space after escape sometimes:  "4px\9 }"  =>  "4px\9}"
+	-- * Maybe preserve space:  "src:url()format()"  =>  "src:url() format()"
+	-- * Maybe don't replace NUL bytes:  "�"  =>  "\0 "
+	-- * Do magical things with -ms-filter props. Ugh...
+	-- * Don't always remove "%":
+	--      "flex-basis:0;"  =>  "flex-basis:0%;"
+	--      "flex:0;"  =>  "flex:0%;"
+
+	if type(tokensIn) == "string" then
+		return css.serializeAndMinimize(css.tokenize(tokensIn), options)
+	end
+
+	local tokensOut      = {}
+	local tokenSourceSet = {}
+	local scopeStack     = {{name="file"}}
+
+	local function enter(scope)
+		assert(scope.name)
+		assert(scope.exit)
+		table.insert(scopeStack, scope)
+	end
+
+	local function exit(symbol, i)
+		local scope = table.remove(scopeStack)
+		if scope.exit ~= symbol then
+			error(F(
+				"[css] Unbalanced scopes at position %d. (expected to exit '%s' scope with '%s', but got '%s')",
+				i, scope.name, tostring(scope.exit), symbol
+			), 2)
+		end
+	end
+
+	local function isAt(scopeName)
+		return scopeStack[#scopeStack].name == scopeName
+	end
+	local function isInside(scopeName)
+		for _, scope in ipairs(scopeStack) do
+			if scope.name == scopeName then  return true  end
+		end
+		return false
+	end
+
+	-- Create minimized token array.
+	--------------------------------
+
+	local function add(token)
+		if tokenSourceSet[token] then
+			local tokSource = token
+			token = {}
+
+			for k, v in pairs(tokSource) do
+				token[k] = v
+			end
+		end
+
+		table.insert(tokensOut, token)
+		return token
+	end
+
+	local currentProperty  = nil
+	local currentAtKeyword = nil
+
+	local keepNextComment  = false
+	local colonsAfterProp  = 0
+
+	for i, tokIn in ipairs(tokensIn) do
+		local tokType = tokIn.type
+
+		tokenSourceSet[tokIn] = true
+
+		if tokType == "dimension" or tokType == "percentage" then
+			if
+				options.autoZero ~= false
+				and tokIn.value == 0
+				and not (isInside"function" or isInside"(" or isInside"@keyframes")
+			then
+				add(newTokenNumber(0))
+
+			else
+				add(tokIn)
+			end
+
+		elseif tokType == "number" then
+			add(tokIn)
+
+		elseif tokType == "function" then
+			local tokOut = add(tokIn)
+
+			-- Lower-case function names, except for crazy things like filter:progid:DXImageTransform.Microsoft.matrix().
+			if colonsAfterProp == 1 or isAt"file" or isAt"@media" or isAt"@supports" or isAt"@document" then
+				tokOut.value = tokOut.value:lower()
+
+				-- Fix letter case for rotateX etc.
+				if
+					substrCompareAsciiChar(tokOut.value, #tokOut.value, "xyz")
+					and isAny(tokOut.value:sub(1, #tokOut.value-1), "rotate","scale","skew","translate")
+				then
+					tokOut.value = tokOut.value:gsub(".$", string.upper)
+				end
+			end
+
+			table.insert(scopeStack, {name="function", exit=")"})
+
+		elseif tokType == "ident" then
+			local tokPrev = getNextToken(tokensOut, #tokensOut, -1)
+			local tokNext = getNextNonWsToken(tokensIn, i+1, 1)
+
+			if isAt"rule" and not currentProperty then
+				local tokOut = add(tokIn)
+				tokOut.value = tokOut.value:lower()
+				currentProperty = tokOut.value
+
+			elseif currentAtKeyword == "media" then
+				-- Is this ok or must we check for specific keywords, like "screen" etc.?
+				local tokOut = add(tokIn)
+				tokOut.value = tokOut.value:lower()
+
+			elseif tokPrev and tokPrev.type == "colon" and not isAt"rule" then
+				-- Both ':' and '::'.
+				local tokOut = add(tokIn)
+				tokOut.value = tokOut.value:lower()
+
+			elseif
+				currentProperty
+				and #tokIn.value == 4 and tokIn.value:lower() == "none"
+				and isAny(currentProperty, "background","border","border-top","border-right","border-bottom","border-left")
+				and (not tokNext or tokNext.type == "semicolon" or tokNext.type == "}")
+			then
+				add(newTokenNumber(0))
+
+			else
+				add(tokIn)
+			end
+
+		elseif tokType == "string" then
+			add(tokIn)
+
+		elseif tokType == "badString" then
+			if options.strict then
+				error("[css] BAD_STRING token at position "..i..".")
+			else
+				print("[css] Warning: BAD_STRING token at position "..i..".")
+				add(tokIn)
+			end
+
+		elseif tokType == "url" then
+			add(tokIn)
+
+		elseif tokType == "badUrl" then
+			if options.strict then
+				error("[css] BAD_URL token at position "..i..".")
+			else
+				print("[css] Warning: BAD_URL token at position "..i..".")
+				add(tokIn)
+			end
+
+		elseif tokType == "unicodeRange" then
+			add(tokIn)
+
+		elseif tokType == "whitespace" then
+
+			-- Note: There shouldn't ever be two whitespace tokens after
+			-- each other (I think), but there could be two or more
+			-- whitespace tokens with comments in-between.
+			local tokPrev = getNextToken(tokensOut, #tokensOut, -1)
+			local tokNext = getNextNonWsToken(tokensIn, i+1, 1)
+
+			if
+				tokPrev and tokNext and (
+					(
+						mustSeparateTokens(tokPrev, tokNext, isInside"rule")
+						or tokensOut[#tokensOut].type == "number" and (
+							tokNext.type == "dimension"
+							or tokNext.type == "percentage"
+							or tokNext.type == "number"
+						)
+					)
+					and not (
+						tokensOut[#tokensOut].type == "comment"
+						and tokensIn[i+1].type == "comment"
+						and tokensIn[i+1].value:find"^!"
+					)
+				)
+			then
+				add(newTokenWhitespace(" "))
+			end
+
+		elseif tokType == "comment" then
+			local tokPrev = getNextToken(tokensOut, #tokensOut, -1) -- Could be whitespace.
+
+			-- Important comment.
+			if substrCompareAsciiChar(tokIn.value, 1, "!") then
+				add(tokIn)
+
+			-- Child selector hack for IE7 and below.
+			-- html >/**/ body p {
+			elseif tokPrev and tokPrev.type == "delim" and tokPrev.value == ">" then
+				add(newTokenComment())
+
+			-- Comment parsing hack for IE Mac.
+			-- /*\*/ hidden /**/
+			elseif tokIn.value:find"\\$" then
+				add(newTokenComment("\\"))
+				keepNextComment = true
+
+			elseif keepNextComment then
+				add(newTokenComment())
+			end
+
+		elseif tokType == "hash" then
+			if currentProperty and isAt"rule" then
+				local tokOut = add(tokIn)
+				tokOut.value = tokOut.value:lower()
+
+				-- Note: It seems CSS4 will add #RRGGBBAA and #RGBA formats, so this code will probably have to be updated.
+				if #tokOut.value == 6 then
+					if
+						tokOut.value:byte(1) == tokOut.value:byte(2) and
+						tokOut.value:byte(3) == tokOut.value:byte(4) and
+						tokOut.value:byte(5) == tokOut.value:byte(6)
+					then
+						tokOut.value = tokOut.value:gsub("(.).", "%1")
+					end
+
+				elseif #tokOut.value ~= 3 then
+					print("Warning: Color value looks incorrect: #"..tokOut.value)
+				end
+
+			else
+				add(tokIn)
+			end
+
+		elseif tokType == "suffixMatch" then
+			add(tokIn)
+		elseif tokType == "substringMatch" then
+			add(tokIn)
+		elseif tokType == "prefixMatch" then
+			add(tokIn)
+		elseif tokType == "dashMatch" then
+			add(tokIn)
+		elseif tokType == "includeMatch" then
+			add(tokIn)
+
+		elseif tokType == "columnMatch" then
+			add(tokIn)
+
+		elseif tokType == "comma" then
+			add(tokIn)
+
+		elseif tokType == "colon" then
+			add(tokIn)
+
+			if currentProperty and isAt"rule" then
+				colonsAfterProp = colonsAfterProp+1
+			end
+
+		elseif tokType == "semicolon" then
+			if isAt"rule" then
+				currentProperty = nil
+				colonsAfterProp = 0
+			end
+
+			currentAtKeyword = nil -- Possible end of @charset ""; or similar.
+
+			local tokPrev = getNextNonWsOrSemicolonToken(tokensOut, #tokensOut, -1)
+			local tokNext = getNextNonWsToken(tokensIn, i+1, 1)
+
+			if
+				tokNext and tokNext.type ~= "}" and tokNext.type ~= "semicolon"
+				and not (tokPrev and tokPrev.type == "{")
+			then
+				add(tokIn)
+			end
+
+		elseif tokType == "cdo" then
+			add(tokIn)
+		elseif tokType == "cdc" then
+			add(tokIn)
+
+		elseif tokType == "atKeyword" then
+			local tokOut = add(tokIn)
+			tokOut.value = tokOut.value:lower()
+
+			currentAtKeyword = tokOut.value
+
+		elseif tokType == "(" then
+			add(tokIn)
+			enter{ name="(", exit=")" }
+
+		elseif tokType == ")" then
+			add(tokIn)
+			exit(")", i)
+
+		elseif tokType == "[" then
+			add(tokIn)
+			enter{ name="[", exit="]" }
+
+		elseif tokType == "]" then
+			add(tokIn)
+			exit("]", i)
+
+		elseif tokType == "{" then
+			add(tokIn)
+
+			if not currentAtKeyword then
+				enter{ name="rule", exit="}" }
+
+			-- Note: @document is experimental and Firefox-only as of 2018-07-18.
+			elseif isAny(currentAtKeyword, "media","supports","document") then
+				enter{ name="condGroup", exit="}" }
+
+			elseif isAny(currentAtKeyword, "font-face","page") then
+				enter{ name="rule", exit="}" }
+
+			else
+				enter{ name="@"..currentAtKeyword, exit="}" }
+			end
+
+			currentAtKeyword = nil
+
+		elseif tokType == "}" then
+			if isAt"rule" then
+				currentProperty = nil
+				colonsAfterProp = 0
+			end
+
+			add(tokIn)
+			exit("}", i)
+
+		elseif tokType == "delim" then
+			add(tokIn)
+
+		else
+			error("[css][internal] Unknown token type '"..tostring(tokType).."'.")
+		end
+		assert(#scopeStack >= 1)
+	end
+
+	-- assert(#scopeStack == 1) -- DEBUG: EOF can appear inside a scope.
+
+	-- Fix IE6 :first-line and :first-letter.
+	-- https://github.com/stoyan/yuicompressor/blob/master/ports/js/cssmin.js
+	--------------------------------
+	for i = #tokensOut-1, 2, -1 do
+		local token = tokensOut[i]
+		if
+			tokensOut[i-1] and tokensOut[i+1]
+			and tokensOut[i].type == "ident" and isAny(tokensOut[i].value, "first-letter","first-line")
+			and tokensOut[i-1].type == "colon"
+			and (not tokensOut[i-2] or tokensOut[i-2].type ~= "colon")
+			and tokensOut[i+1].type ~= "whitespace"
+		then
+			table.insert(tokensOut, i+1, newTokenWhitespace(" "))
+		end
+			-- isPreceededBy(tokensOut, #tokensOut, "ident","first-letter", "colon", "!","colon") or
+			-- isPreceededBy(tokensOut, #tokensOut, "ident","first-line",   "colon", "!","colon")
+	end
+
+	-- Put @charset first.
+	--------------------------------
+
+	local charset = nil
+
+	for i = #tokensOut-1, 1, -1 do
+		if
+			tokensOut[i+1]
+			and tokensOut[i].type == "atKeyword" and tokensOut[i].value == "charset"
+			and tokensOut[i+1].type == "string"
+			and (not tokensOut[i+2] or tokensOut[i+2].type == "semicolon")
+		then
+			if charset and tokensOut[i+1].value ~= charset then
+				if options.strict then
+					error(F("[css] Conflicting @charset values. ('%s' and '%s')", tokensOut[i+1].value, charset))
+				else
+					print(F("[css] Warning: Conflicting @charset values. ('%s' and '%s')", tokensOut[i+1].value, charset))
+				end
+			end
+
+			charset = tokensOut[i+1].value -- Note: We want the first charset value, and we're going backwards.
+
+			table.remove(tokensOut, i+1)
+			table.remove(tokensOut, i)
+
+			if tokensOut[i] then
+				table.remove(tokensOut, i)
+			end
+		end
+	end
+
+	if charset then
+		table.insert(tokensOut, 1, {type="atKeyword", value="charset"})
+		table.insert(tokensOut, 2, newTokenWhitespace(" "))
+		table.insert(tokensOut, 3, {type="string", value=charset, quoteCharacter='"'})
+		table.insert(tokensOut, 4, {type="semicolon"})
+	end
+
+	--------------------------------
+
+	return tokensOut
 end
 
 

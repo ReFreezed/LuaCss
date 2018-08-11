@@ -1,9 +1,12 @@
 # LuaCss
 
-CSS tokenizing and minimizing library for Lua 5.1. No external dependencies - only pure Lua.
+CSS tokenizing and minimizing library for Lua 5.1.
+No external dependencies - only pure Lua.
+The library tries to closely follow the [CSS3 specification](https://www.w3.org/TR/css-syntax-3/).
 
 - [Usage](#usage)
 - [API](#api)
+- [Options](#options)
 - [Token Format](#token-format)
 	- [Token Types](#token-types)
 
@@ -36,14 +39,34 @@ local minimizedCss = cssLib.minimize(css)
 
 ## API
 
+
 ### minimize
-`cssString = minimize( cssString [, strictErrors=false ] )`
+`cssString = minimize( cssString [, options ] )`<br>
+`tokens = minimize( tokens [, options ] )`
+
+Minimize a CSS string or a token array.
+In the case of tokens, the original array is unchanged and a new array is returned.
+See available [options](#options).
+
+
+### serialize
+`cssString = serialize( tokens [, options ] )`
+
+Convert a token array to CSS string.
+See available [options](#options).
+
 
 ### serializeAndMinimize
-`cssString = serializeAndMinimize( cssTokens [, strictErrors=false ] )`
+`cssString = serializeAndMinimize( tokens [, options ] )`
+
+Convert a token array to minimized CSS string.
+See available [options](#options).
+
 
 ### tokenize
-`cssTokens = tokenize( cssString )`
+`tokens = tokenize( cssString )`
+
+Convert a CSS string to tokens.
 
 ```lua
 local tokens = cssLib.tokenize(css)
@@ -52,6 +75,22 @@ for i, token in ipairs(tokens) do
 	print(i, token.type, token.value, token.unit)
 end
 ```
+
+Note that all instances of U+0000 (NULL) code points are converted to U+FFFD (replacement character) per the specification.
+
+
+
+## Options
+`options` is a table that can have any of these fields:
+
+### autoZero
+Enable automatic conversion of *zero* values (e.g. `0px` or `0%`) to become simply `0` during minification.
+The default value is `true`.
+
+### strict
+Trigger an error if a `badString` or `badUrl` token is encountered during minification.
+Otherwise, the error message is only printed.
+The default value is `false`.
 
 
 

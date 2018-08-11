@@ -134,7 +134,7 @@ function utf8charbytes(s, i)
 		local c2 = sbyte(s, i+1)
 
 		if not c2 then
-			error("UTF-8 string terminated early")
+			error("UTF-8 string terminated early after position "..i.." (2-byte char)")
 		end
 
 		-- Validate byte 2.
@@ -150,7 +150,7 @@ function utf8charbytes(s, i)
 		local c3 = sbyte(s, i+2)
 
 		if not c2 or not c3 then
-			error("UTF-8 string terminated early")
+			error("UTF-8 string terminated early after position "..i.." (3-byte char)")
 		end
 
 		-- Validate byte 2.
@@ -176,7 +176,7 @@ function utf8charbytes(s, i)
 		local c4 = sbyte(s, i+3)
 
 		if not c2 or not c3 or not c4 then
-			error("UTF-8 string terminated early")
+			error("UTF-8 string terminated early after position "..i.." (4-byte char)")
 		end
 
 		-- Validate byte 2.

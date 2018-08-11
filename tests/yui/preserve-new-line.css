@@ -1,0 +1,7 @@
+/* Actually, don't... https://www.w3.org/TR/css-syntax-3/#consume-a-string-token */
+#sel-o {
+  content: "on\"ce upon \
+a time";
+  content: 'once upon \
+a ti\'me';
+}

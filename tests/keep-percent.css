@@ -1,0 +1,12 @@
+.SB-messages .SB-message a {
+	color: rgba(0%, 50%, 50%, 0.3);
+	border-bottom: 1px dotted rgb(185, 99, 117);
+	text-shadow: 0 1px 0 hsla(0, 0%, 0%, 1);
+	flex-basis: 0%;
+	flex: 0%;
+}
+
+@keyframes fadeIn {
+	0% {opacity: 0}
+	100% {opacity: 0.5}
+}
