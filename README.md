@@ -1,5 +1,7 @@
 # LuaCss
 
+![version 1.0](https://img.shields.io/badge/version-1.0-green.svg)
+
 CSS tokenizing and minimizing library for Lua 5.1.
 No external dependencies - only pure Lua.
 The library tries to closely follow the [CSS3 specification](https://www.w3.org/TR/css-syntax-3/).
@@ -77,6 +79,12 @@ end
 ```
 
 Note that all instances of U+0000 (NULL) code points are converted to U+FFFD (replacement character) per the specification.
+
+
+### _VERSION
+`version = _VERSION`
+
+Not a function! Get the version of the library, i.e. `"1.0.2"`.
 
 
 

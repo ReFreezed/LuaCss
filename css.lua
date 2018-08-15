@@ -86,7 +86,7 @@ local utf8 = require((path.."utf8"):sub(2))
 
 local F = string.format
 
-local css = {VERSION="0.1.0"}
+local css = {_VERSION="1.0.0"}
 
 
 
@@ -1754,14 +1754,14 @@ function css.minimize(tokensIn, options)
 				end
 
 			elseif tokType == "semicolon" then
+				cb(token, tokType, i)
+
 				if isAt"rule" then
 					currentProperty = nil
 					colonsAfterProp = 0
 				end
 
 				currentAtKeyword = nil -- Possible end of @charset ""; or similar.
-
-				cb(token, tokType, i)
 
 			elseif tokType == "atKeyword" then
 				token = cb(token, tokType, i) or token
@@ -1822,9 +1822,9 @@ function css.minimize(tokensIn, options)
 
 	local function printPeek(tokens, i, count)
 		print("----------------")
-		for j = i, math.min(i+count, #tokens) do
+		for j = math.min(i+count, i), math.max(i+count, i) do
 			if not tokens[j] then  break  end
-			print(j-i, tokens[j].type, tokens[j].value)
+			print(j-i, tokens[j].type, tokens[j].value or "")
 		end
 		print("----------------")
 	end
@@ -1998,7 +1998,7 @@ function css.minimize(tokensIn, options)
 
 				-- Note: It seems CSS4 will add #RRGGBBAA and #RGBA formats, so this code will probably have to be updated.
 				if not isAny(#tokOut.value, 3,6) then
-					print("Warning: Color value looks incorrect: #"..tokOut.value)
+					print("[css] Warning: Color value looks incorrect: #"..tokOut.value)
 				end
 
 				return tokOut
@@ -2012,8 +2012,8 @@ function css.minimize(tokensIn, options)
 			local tokNext = getNextNonWsToken(tokensIn, i+1, 1)
 
 			if
-				tokNext and tokNext.type ~= "}" and tokNext.type ~= "semicolon"
-				and not (tokPrev and tokPrev.type == "{")
+				tokNext and not isAny(tokNext.type, "}","semicolon")
+				and not (tokPrev and isAny(tokPrev.type, "{","}"))
 			then
 				add(tokIn)
 			end
@@ -2071,6 +2071,61 @@ function css.minimize(tokensIn, options)
 			error("[css][internal] Unknown token type '"..tostring(tokType).."'.")
 		end
 	end)
+
+	-- Remove empty rules.
+	--------------------------------
+	local ruleBeginnings = {}
+	local ruleDepth      = 0
+	local lastRuleStart  = 0
+	local isInSomethingInFileScope = false
+
+	tokensIn  = tokensOut
+	tokensOut = {}
+
+	eachToken(tokensIn, nil, nil, nil, function(tokIn, tokType, i)
+		add(tokIn)
+
+		if not isInSomethingInFileScope and tokType ~= "comment" then
+			lastRuleStart = #tokensOut
+			isInSomethingInFileScope = true
+
+		elseif tokType == "{" then
+			table.insert(ruleBeginnings, lastRuleStart)
+			ruleDepth = ruleDepth+1
+
+			lastRuleStart = #tokensOut+1
+
+		elseif tokType == "}" then
+			local ruleStart = table.remove(ruleBeginnings)
+			ruleDepth = ruleDepth-1
+
+			if not ruleStart then
+				error("[css] Uneven curly brackets.")
+			end
+
+			local tokPrev = getNextToken(tokensOut, #tokensOut-1, -1)
+			if tokPrev.type == "{" then
+				for j = #tokensOut, ruleStart, -1 do
+					table.remove(tokensOut, j)
+				end
+			end
+
+			lastRuleStart = #tokensOut+1
+			if ruleDepth == 0 then
+				isInSomethingInFileScope = false
+			end
+
+		elseif tokType == "semicolon" and currentAtKeyword then
+			lastRuleStart = #tokensOut+1
+			if ruleDepth == 0 then
+				isInSomethingInFileScope = false
+			end
+		end
+	end)
+
+	if tokensOut[1] and tokensOut[#tokensOut].type == "semicolon" then
+		table.remove(tokensOut)
+	end
 
 	-- Minimize specific properties.
 	--------------------------------
@@ -2136,7 +2191,14 @@ function css.minimize(tokensIn, options)
 				table.insert(tokensOut, i+1, newTokenWhitespace(" "))
 			end
 
-			nextTokenIndex = i
+			-- We also don't need any space before anymore.
+			if tokensOut[i-1] and tokensOut[i-1].type == "whitespace" then
+				table.remove(tokensOut, i-1)
+				nextTokenIndex = i-1
+			else
+				nextTokenIndex = i
+			end
+
 			return
 		end
 

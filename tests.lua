@@ -101,7 +101,7 @@ local function runTest(css, printCss)
 
 
 
-	--[[ Round-trip test.
+	-- [[ Round-trip test.
 	local cssAgain = cssLib.minimize(css)
 
 	if printCss then
@@ -288,5 +288,5 @@ end
 
 -- runSmallTest()
 -- runTestOnFile("test.css")
--- runTestOnFile("tests/yui/pseudo-first.css", true)
+-- runTestOnFile("tests/yui/issue205.css", true)
 runTestsuite(true)
