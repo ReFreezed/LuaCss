@@ -99,10 +99,12 @@ local getKeys
 local indexOf
 local inRange
 local isAny
+local isNumberToken
 local isValidCodepoint, isControlCharacterCodepoint, isSurrogateCodepoint
 local makeString
 local newTokenComment, newTokenWhitespace, newTokenNumber
 local printobj
+local round, clamp
 local sort
 local sortNatural, compareNatural
 local substrCompareAsciiChar, substrCompareBytes
@@ -356,6 +358,22 @@ function isAny(v, ...)
 		if v == select(i, ...) then  return true  end
 	end
 	return false
+end
+
+
+
+function isNumberToken(token)
+	return token ~= nil and isAny(token.type, "dimension","percentage","number")
+end
+
+
+
+function round(n)
+	return math.floor(n+0.5)
+end
+
+function clamp(n, nMin, nMax)
+	return math.min(math.max(n, nMin), nMax)
 end
 
 
@@ -1370,7 +1388,7 @@ end
 --==============================================================
 
 local getNextToken, getNextNonWsToken, getNextNonWsOrSemicolonToken
-local isPreceededBy
+local isSucceededBy
 local mustSeparateTokens
 
 
@@ -1558,25 +1576,25 @@ end
 
 
 
--- bool = isPreceededBy( tokens, tokIndex, matchSequence... )
+-- bool = isSucceededBy( tokens, startIndex, direction, matchSequence... )
 -- Match sequences:
---  * [ doNotMatch=="!" ], tokenType
---  * [ doNotMatch=="!" ], tokenType=="atKeyword", tokenValue
---  * [ doNotMatch=="!" ], tokenType=="delim",     tokenValue
---  * [ doNotMatch=="!" ], tokenType=="ident",     tokenValue
--- Note that the traversal is going backwards.
-local function isPreceededBy(tokens, tokIndex, ...)
+--  * [ doNotMatch=="!" ], tokenTypeLike
+--  * [ doNotMatch=="!" ], tokenTypeLike=="atKeyword", tokenValue
+--  * [ doNotMatch=="!" ], tokenTypeLike=="delim",     tokenValue
+--  * [ doNotMatch=="!" ], tokenTypeLike=="ident",     tokenValue
+-- tokenTypeLike = tokenType|"numberLike"|"integer"
+function isSucceededBy(tokens, tokIndex, dir, ...)
 	local argCount = select("#", ...)
 	local argIndex = 1
 
-	print("~~~~~~~~~~~~~~~~~~~~~~~~")
-	print("isPreceededBy", argCount, "|", ...)
+	-- print("~~~~~~~~~~~~~~~~~~~~~~~~")
+	-- print("isSucceededBy", argCount, "|", ...)
 
 	while argIndex <= argCount do
 		local token = tokens[tokIndex]
 		if not token then  return false  end
 
-		print("arg "..argIndex)
+		-- print("arg "..argIndex)
 
 		if token.type ~= "comment" then
 			local tokType = select(argIndex, ...)
@@ -1586,23 +1604,35 @@ local function isPreceededBy(tokens, tokIndex, ...)
 			if tokType == "!" then
 				wantMatch = false
 
-				tokType = select(argIndex, ...)
-				argIndex = argIndex+1
+				tokType   = select(argIndex, ...)
+				argIndex  = argIndex+1
 			end
 
-			print(wantMatch and "want:typ  " or "nowant:typ", tokType)
-			print("got:typ", token.type)
+			-- print(wantMatch and "want:typ  " or "nowant:typ", tokType)
+			-- print("got:typ", token.type)
 
-			if (token.type == tokType) ~= wantMatch then
-				print("nope")
-				return false
+			if tokType == "integer" then
+				if (token.type == "number" and token.numberType == "integer") ~= wantMatch then
+					-- print("nope")
+					return false
+				end
+			elseif tokType == "numberLike" then
+				if isAny(token.type, "dimension","percentage","number") ~= wantMatch then
+					-- print("nope")
+					return false
+				end
+			else
+				if (token.type == tokType) ~= wantMatch then
+					-- print("nope")
+					return false
+				end
 			end
 
 			if isAny(tokType, "ident","delim","atKeyword") then
-				print(wantMatch and "want:val  " or "nowant:val", select(argIndex, ...))
-				print("got:val", token.value)
+				-- print(wantMatch and "want:val  " or "nowant:val", select(argIndex, ...))
+				-- print("got:val", token.value)
 				if (token.value == select(argIndex, ...)) ~= wantMatch then
-					print("nope")
+					-- print("nope")
 					return false
 				end
 
@@ -1610,10 +1640,10 @@ local function isPreceededBy(tokens, tokIndex, ...)
 			end
 		end
 
-		tokIndex = tokIndex-1
+		tokIndex = tokIndex+dir
 	end
 
-	print("YYEEESSS")
+	-- print("YYEEESSS")
 	return true
 end
 
@@ -1623,28 +1653,22 @@ end
 -- tokens = minimize( tokens [, options ] )
 function css.minimize(tokensIn, options)
 	-- @Incomplete:
-	-- * Less prop values:
-	--      "background-position:0 0 0 0"  =>  "background-position:0 0"
-	--      "margin:0 0 0 0"  =>  "margin:0"
 	-- * No empty rules:  "body div{}"  =>  ""
-	-- * Simplify rgb colors:  "rgb(123,123,123)"  =>  "#7b7b7b"
-	-- * Simplify opacity in colors:  "hsla(0,0,0,1)"/"rgba(0,0,0,1)"  => "hsla(0,0,0)"/"rgba(0,0,0)"
 	-- * Unstring font names, if possible:  '"Arial"'  =>  'Arial'
 	-- * Omit space after escape sometimes:  "4px\9 }"  =>  "4px\9}"
 	-- * Maybe preserve space:  "src:url()format()"  =>  "src:url() format()"
 	-- * Maybe don't replace NUL bytes:  "�"  =>  "\0 "
 	-- * Do magical things with -ms-filter props. Ugh...
-	-- * Don't always remove "%":
-	--      "flex-basis:0;"  =>  "flex-basis:0%;"
-	--      "flex:0;"  =>  "flex:0%;"
 
 	if type(tokensIn) == "string" then
 		return css.serializeAndMinimize(css.tokenize(tokensIn), options)
 	end
 
-	local tokensOut      = {}
-	local tokenSourceSet = {}
-	local scopeStack     = {{name="file"}}
+	local scopeStack
+	local currentProperty
+	local currentAtKeyword
+	local colonsAfterProp
+	local nextTokenIndex
 
 	local function enter(scope)
 		assert(scope.name)
@@ -1672,8 +1696,146 @@ function css.minimize(tokensIn, options)
 		return false
 	end
 
+	-- eachToken( tokens, startIndex=auto, endIndex=auto, direction=1, callback )
+	-- direction = 1|-1
+	-- [ token = ] callback( token, tokenType, index )
+	-- Note: currentProperty etc. is only available if iterating forwards from index 1.
+	local function eachToken(tokens, iStart, iEnd, dir, cb)
+		scopeStack       = {{name="file"}}
+		currentProperty  = nil
+		currentAtKeyword = nil
+		colonsAfterProp  = 0
+		nextTokenIndex   = 0
+
+		dir    = dir    or 1
+		iStart = iStart or (dir < 0 and #tokens or 1)
+		iEnd   = iEnd   or (dir < 0 and 1 or #tokens)
+
+		local iMin = math.min(iStart, iEnd)
+		local iMax = math.max(iStart, iEnd)
+		local i    = iStart-dir
+
+		local doExtra = (dir == 1 and iStart == 1)
+
+		while true do
+			if nextTokenIndex > 0 then
+				i              = nextTokenIndex
+				nextTokenIndex = 0
+				doExtra        = false
+			else
+				i = i+dir
+			end
+
+			local token = tokens[i]
+			if not token or i < iMin or i > iMax then  break  end
+
+			local tokType  = token.type
+
+			if not doExtra then
+				cb(token, tokType, i)
+
+			elseif tokType == "function" then
+				cb(token, tokType, i)
+
+				enter{ name="function", exit=")" }
+
+			elseif tokType == "ident" then
+				token = cb(token, tokType, i) or token
+
+				if isAt"rule" and not currentProperty then
+					currentProperty = token.value
+				end
+
+			elseif tokType == "colon" then
+				cb(token, tokType, i)
+
+				if currentProperty and isAt"rule" then
+					colonsAfterProp = colonsAfterProp+1
+				end
+
+			elseif tokType == "semicolon" then
+				if isAt"rule" then
+					currentProperty = nil
+					colonsAfterProp = 0
+				end
+
+				currentAtKeyword = nil -- Possible end of @charset ""; or similar.
+
+				cb(token, tokType, i)
+
+			elseif tokType == "atKeyword" then
+				token = cb(token, tokType, i) or token
+				currentAtKeyword = token.value
+
+			elseif tokType == "(" then
+				cb(token, tokType, i)
+				enter{ name="(", exit=")" }
+
+			elseif tokType == ")" then
+				cb(token, tokType, i)
+				exit(")", i)
+
+			elseif tokType == "[" then
+				cb(token, tokType, i)
+				enter{ name="[", exit="]" }
+
+			elseif tokType == "]" then
+				cb(token, tokType, i)
+				exit("]", i)
+
+			elseif tokType == "{" then
+				cb(token, tokType, i)
+
+				if not currentAtKeyword then
+					enter{ name="rule", exit="}" }
+
+				-- Note: @document is experimental and Firefox-only as of 2018-07-18.
+				elseif isAny(currentAtKeyword, "media","supports","document") then
+					enter{ name="condGroup", exit="}" }
+
+				elseif isAny(currentAtKeyword, "font-face","page") then
+					enter{ name="rule", exit="}" }
+
+				else
+					enter{ name="@"..currentAtKeyword, exit="}" }
+				end
+
+				currentAtKeyword = nil
+
+			elseif tokType == "}" then
+				if isAt"rule" then
+					currentProperty = nil
+					colonsAfterProp = 0
+				end
+
+				cb(token, tokType, i)
+				exit("}", i)
+
+			else
+				cb(token, tokType, i)
+			end
+			assert(#scopeStack >= 1)
+		end
+
+		-- assert(#scopeStack == 1) -- DEBUG: EOF is allowed to appear inside a scope.
+	end
+
+	local function printPeek(tokens, i, count)
+		print("----------------")
+		for j = i, math.min(i+count, #tokens) do
+			if not tokens[j] then  break  end
+			print(j-i, tokens[j].type, tokens[j].value)
+		end
+		print("----------------")
+	end
+
 	-- Create minimized token array.
 	--------------------------------
+
+	local tokenSourceSet  = {}
+	local tokensOut       = {}
+
+	local keepNextComment = false
 
 	local function add(token)
 		if tokenSourceSet[token] then
@@ -1689,21 +1851,14 @@ function css.minimize(tokensIn, options)
 		return token
 	end
 
-	local currentProperty  = nil
-	local currentAtKeyword = nil
-
-	local keepNextComment  = false
-	local colonsAfterProp  = 0
-
-	for i, tokIn in ipairs(tokensIn) do
-		local tokType = tokIn.type
-
+	eachToken(tokensIn, nil, nil, nil, function(tokIn, tokType, i)
 		tokenSourceSet[tokIn] = true
 
-		if tokType == "dimension" or tokType == "percentage" then
+		if isAny(tokType, "dimension","percentage") then
 			if
 				options.autoZero ~= false
 				and tokIn.value == 0
+				and not isAny(currentProperty, "flex","flex-basis")
 				and not (isInside"function" or isInside"(" or isInside"@keyframes")
 			then
 				add(newTokenNumber(0))
@@ -1731,7 +1886,7 @@ function css.minimize(tokensIn, options)
 				end
 			end
 
-			table.insert(scopeStack, {name="function", exit=")"})
+			return tokOut
 
 		elseif tokType == "ident" then
 			local tokPrev = getNextToken(tokensOut, #tokensOut, -1)
@@ -1740,17 +1895,19 @@ function css.minimize(tokensIn, options)
 			if isAt"rule" and not currentProperty then
 				local tokOut = add(tokIn)
 				tokOut.value = tokOut.value:lower()
-				currentProperty = tokOut.value
+				return tokOut
 
 			elseif currentAtKeyword == "media" then
 				-- Is this ok or must we check for specific keywords, like "screen" etc.?
 				local tokOut = add(tokIn)
 				tokOut.value = tokOut.value:lower()
+				return tokOut
 
 			elseif tokPrev and tokPrev.type == "colon" and not isAt"rule" then
 				-- Both ':' and '::'.
 				local tokOut = add(tokIn)
 				tokOut.value = tokOut.value:lower()
+				return tokOut
 
 			elseif
 				currentProperty
@@ -1766,7 +1923,6 @@ function css.minimize(tokensIn, options)
 
 		elseif tokType == "string" then
 			add(tokIn)
-
 		elseif tokType == "badString" then
 			if options.strict then
 				error("[css] BAD_STRING token at position "..i..".")
@@ -1777,7 +1933,6 @@ function css.minimize(tokensIn, options)
 
 		elseif tokType == "url" then
 			add(tokIn)
-
 		elseif tokType == "badUrl" then
 			if options.strict then
 				error("[css] BAD_URL token at position "..i..".")
@@ -1785,9 +1940,6 @@ function css.minimize(tokensIn, options)
 				print("[css] Warning: BAD_URL token at position "..i..".")
 				add(tokIn)
 			end
-
-		elseif tokType == "unicodeRange" then
-			add(tokIn)
 
 		elseif tokType == "whitespace" then
 
@@ -1845,22 +1997,34 @@ function css.minimize(tokensIn, options)
 				tokOut.value = tokOut.value:lower()
 
 				-- Note: It seems CSS4 will add #RRGGBBAA and #RGBA formats, so this code will probably have to be updated.
-				if #tokOut.value == 6 then
-					if
-						tokOut.value:byte(1) == tokOut.value:byte(2) and
-						tokOut.value:byte(3) == tokOut.value:byte(4) and
-						tokOut.value:byte(5) == tokOut.value:byte(6)
-					then
-						tokOut.value = tokOut.value:gsub("(.).", "%1")
-					end
-
-				elseif #tokOut.value ~= 3 then
+				if not isAny(#tokOut.value, 3,6) then
 					print("Warning: Color value looks incorrect: #"..tokOut.value)
 				end
+
+				return tokOut
 
 			else
 				add(tokIn)
 			end
+
+		elseif tokType == "semicolon" then
+			local tokPrev = getNextNonWsOrSemicolonToken(tokensOut, #tokensOut, -1)
+			local tokNext = getNextNonWsToken(tokensIn, i+1, 1)
+
+			if
+				tokNext and tokNext.type ~= "}" and tokNext.type ~= "semicolon"
+				and not (tokPrev and tokPrev.type == "{")
+			then
+				add(tokIn)
+			end
+
+		elseif tokType == "atKeyword" then
+			local tokOut = add(tokIn)
+			tokOut.value = tokOut.value:lower()
+			return tokOut
+
+		elseif tokType == "unicodeRange" then
+			add(tokIn)
 
 		elseif tokType == "suffixMatch" then
 			add(tokIn)
@@ -1882,82 +2046,23 @@ function css.minimize(tokensIn, options)
 		elseif tokType == "colon" then
 			add(tokIn)
 
-			if currentProperty and isAt"rule" then
-				colonsAfterProp = colonsAfterProp+1
-			end
-
-		elseif tokType == "semicolon" then
-			if isAt"rule" then
-				currentProperty = nil
-				colonsAfterProp = 0
-			end
-
-			currentAtKeyword = nil -- Possible end of @charset ""; or similar.
-
-			local tokPrev = getNextNonWsOrSemicolonToken(tokensOut, #tokensOut, -1)
-			local tokNext = getNextNonWsToken(tokensIn, i+1, 1)
-
-			if
-				tokNext and tokNext.type ~= "}" and tokNext.type ~= "semicolon"
-				and not (tokPrev and tokPrev.type == "{")
-			then
-				add(tokIn)
-			end
-
 		elseif tokType == "cdo" then
 			add(tokIn)
 		elseif tokType == "cdc" then
 			add(tokIn)
 
-		elseif tokType == "atKeyword" then
-			local tokOut = add(tokIn)
-			tokOut.value = tokOut.value:lower()
-
-			currentAtKeyword = tokOut.value
-
 		elseif tokType == "(" then
 			add(tokIn)
-			enter{ name="(", exit=")" }
-
 		elseif tokType == ")" then
 			add(tokIn)
-			exit(")", i)
-
 		elseif tokType == "[" then
 			add(tokIn)
-			enter{ name="[", exit="]" }
-
 		elseif tokType == "]" then
 			add(tokIn)
-			exit("]", i)
-
 		elseif tokType == "{" then
 			add(tokIn)
-
-			if not currentAtKeyword then
-				enter{ name="rule", exit="}" }
-
-			-- Note: @document is experimental and Firefox-only as of 2018-07-18.
-			elseif isAny(currentAtKeyword, "media","supports","document") then
-				enter{ name="condGroup", exit="}" }
-
-			elseif isAny(currentAtKeyword, "font-face","page") then
-				enter{ name="rule", exit="}" }
-
-			else
-				enter{ name="@"..currentAtKeyword, exit="}" }
-			end
-
-			currentAtKeyword = nil
-
 		elseif tokType == "}" then
-			if isAt"rule" then
-				currentProperty = nil
-				colonsAfterProp = 0
-			end
-
 			add(tokIn)
-			exit("}", i)
 
 		elseif tokType == "delim" then
 			add(tokIn)
@@ -1965,38 +2070,260 @@ function css.minimize(tokensIn, options)
 		else
 			error("[css][internal] Unknown token type '"..tostring(tokType).."'.")
 		end
-		assert(#scopeStack >= 1)
-	end
+	end)
 
-	-- assert(#scopeStack == 1) -- DEBUG: EOF can appear inside a scope.
+	-- Minimize specific properties.
+	--------------------------------
+
+	-- Replace/remove.
+	eachToken(tokensOut, nil, nil, -1, function(token, tokType, i)
+
+		-- rgba(*,*,*,1) -> rgb(*,*,*)
+		-- hsla(*,*,*,1) -> hsl(*,*,*)
+		if
+			tokType == "function"
+			and isAny(token.value, "hsla","rgba")
+			and isSucceededBy(tokensOut, i+1, 1,
+				--[[1]] "numberLike",
+				--[[2]] "comma",
+				--[[3]] "numberLike",
+				--[[4]] "comma",
+				--[[5]] "numberLike",
+				--[[6]] "comma",
+				--[[7]] "numberLike",
+				--[[8]] ")"
+			)
+			and tokensOut[i+7].value == 1
+		then
+			token.value = token.value:sub(1, 3)
+			table.remove(tokensOut, i+7)
+			table.remove(tokensOut, i+6)
+			nextTokenIndex = i
+			return
+		end
+
+		-- rgb(*,*,*) -> #******
+		if
+			tokType == "function"
+			and token.value == "rgb"
+			and isSucceededBy(tokensOut, i+1, 1,
+				--[[1]] "integer",
+				--[[2]] "comma",
+				--[[3]] "integer",
+				--[[4]] "comma",
+				--[[5]] "integer",
+				--[[6]] ")"
+			)
+		then
+			token = {type="hash"}
+
+			token.value = F(
+				"%02x%02x%02x",
+				clamp(tokensOut[i+1].value, 0, 255),
+				clamp(tokensOut[i+3].value, 0, 255),
+				clamp(tokensOut[i+5].value, 0, 255)
+			)
+
+			token.idType = isIdentStart(token.value, 1) and "id" or "unrestricted"
+
+			for j = i+6, i+1, -1 do
+				table.remove(tokensOut, j)
+			end
+			tokensOut[i] = token
+
+			-- Make sure we don't have an ID or something right after.
+			if tokensOut[i+1] and mustSeparateTokens(token, tokensOut[i+1], true) then
+				table.insert(tokensOut, i+1, newTokenWhitespace(" "))
+			end
+
+			nextTokenIndex = i
+			return
+		end
+
+		-- background-position:0 0 0 0 -> background-position:0 0
+		if
+			tokType == "ident"
+			and token.value == "background-position"
+			and isSucceededBy(tokensOut, i+1, 1,
+				--[[1]] "colon",
+				--[[2]] "numberLike",
+				--[[3]] "whitespace",
+				--[[4]] "numberLike",
+				--[[5]] "whitespace",
+				--[[6]] "numberLike",
+				--[[7]] "whitespace",
+				--[[8]] "numberLike"
+			)
+			and tokensOut[i+2].value == 0
+			and tokensOut[i+4].value == 0
+			and tokensOut[i+6].value == 0
+			and tokensOut[i+8].value == 0
+		then
+			for j = i+8, i+5, -1 do
+				table.remove(tokensOut, j)
+			end
+
+			nextTokenIndex = i
+			return
+		end
+
+		-- margin:1 2 1 2  -> margin:1 2
+		-- padding:1 2 1 2 -> padding:1 2
+		if
+			tokType == "ident"
+			and isAny(token.value, "margin","padding","background-position")
+			and isSucceededBy(tokensOut, i+1, 1,
+				--[[1]] "colon",
+				--[[2]] "numberLike",
+				--[[3]] "whitespace",
+				--[[4]] "numberLike",
+				--[[5]] "whitespace",
+				--[[6]] "numberLike",
+				--[[7]] "whitespace",
+				--[[8]] "numberLike"
+			)
+			and tokensOut[i+2].type  == tokensOut[i+6].type
+			and tokensOut[i+4].type  == tokensOut[i+8].type
+			and tokensOut[i+2].value == tokensOut[i+6].value
+			and tokensOut[i+4].value == tokensOut[i+8].value
+		then
+			for j = i+8, i+5, -1 do
+				table.remove(tokensOut, j)
+			end
+
+			nextTokenIndex = i
+			return
+		end
+
+		-- margin:1 2 3 2  -> margin:1 2 3
+		-- padding:1 2 3 2 -> padding:1 2 3
+		if
+			tokType == "ident"
+			and isAny(token.value, "margin","padding")
+			and isSucceededBy(tokensOut, i+1, 1,
+				--[[1]] "colon",
+				--[[2]] "numberLike",
+				--[[3]] "whitespace",
+				--[[4]] "numberLike",
+				--[[5]] "whitespace",
+				--[[6]] "numberLike",
+				--[[7]] "whitespace",
+				--[[8]] "numberLike"
+			)
+			and tokensOut[i+4].type  == tokensOut[i+8].type
+			and tokensOut[i+4].value == tokensOut[i+8].value
+		then
+			for j = i+8, i+7, -1 do
+				table.remove(tokensOut, j)
+			end
+
+			nextTokenIndex = i
+			return
+		end
+
+		-- margin:0 0  -> margin:0
+		-- padding:0 0 -> padding:0
+		if
+			tokType == "ident"
+			and isAny(token.value, "margin","padding")
+			and isSucceededBy(tokensOut, i+1, 1,
+				--[[1]] "colon",
+				--[[2]] "numberLike",
+				--[[3]] "whitespace",
+				--[[4]] "numberLike"
+			)
+			and not isSucceededBy(tokensOut, i+1, 1,
+				--[[1]] "colon",
+				--[[2]] "numberLike",
+				--[[3]] "whitespace",
+				--[[4]] "numberLike",
+				--[[5]] "whitespace",
+				--[[6]] "numberLike"
+			)
+			and tokensOut[i+2].type  == tokensOut[i+4].type
+			and tokensOut[i+2].value == tokensOut[i+4].value
+		then
+			for j = i+4, i+3, -1 do
+				table.remove(tokensOut, j)
+			end
+
+			nextTokenIndex = i
+			return
+		end
+
+		-- Remove unit from number-likes inside some specific functions.
+		if
+			tokType == "function"
+			and token.value == "rotate3d"
+			and isSucceededBy(tokensOut, i+1, 1,
+				--[[1]] "numberLike",
+				--[[2]] "comma",
+				--[[3]] "numberLike",
+				--[[4]] "comma",
+				--[[5]] "numberLike",
+				--[[6]] ")"
+			)
+			and tokensOut[i+1].value == 0
+			and tokensOut[i+3].value == 0
+			and tokensOut[i+5].value == 0
+		then
+			tokensOut[i+1] = newTokenNumber(0)
+			tokensOut[i+3] = newTokenNumber(0)
+			tokensOut[i+5] = newTokenNumber(0)
+
+			-- nextTokenIndex = i -- No! We'll end up in an infinite loop.
+			return
+		end
+
+	end)
+
+	-- Shorten.
+	eachToken(tokensOut, nil, nil, nil, function(token, tokType, i)
+
+		--- #aabbcc -> #abc
+		--- Note: It seems CSS4 will add #RRGGBBAA and #RGBA formats, so this code will probably have to be updated.
+		if tokType == "hash" then
+			local colorHash = token.value
+			if
+				currentProperty
+				and isAt"rule"
+				and #colorHash == 6
+				and colorHash:byte(1) == colorHash:byte(2)
+				and colorHash:byte(3) == colorHash:byte(4)
+				and colorHash:byte(5) == colorHash:byte(6)
+			then
+				token.value = colorHash:gsub("(.).", "%1")
+			end
+		end
+
+	end)
 
 	-- Fix IE6 :first-line and :first-letter.
 	-- https://github.com/stoyan/yuicompressor/blob/master/ports/js/cssmin.js
 	--------------------------------
-	for i = #tokensOut-1, 2, -1 do
-		local token = tokensOut[i]
+	eachToken(tokensOut, #tokensOut-1, 2, -1, function(token, tokType, i)
 		if
 			tokensOut[i-1] and tokensOut[i+1]
 			and tokensOut[i].type == "ident" and isAny(tokensOut[i].value, "first-letter","first-line")
 			and tokensOut[i-1].type == "colon"
 			and (not tokensOut[i-2] or tokensOut[i-2].type ~= "colon")
 			and tokensOut[i+1].type ~= "whitespace"
+			-- isSucceededBy(tokensOut, #tokensOut, -1, "ident","first-letter", "colon", "!","colon") or
+			-- isSucceededBy(tokensOut, #tokensOut, -1, "ident","first-line",   "colon", "!","colon")
 		then
 			table.insert(tokensOut, i+1, newTokenWhitespace(" "))
 		end
-			-- isPreceededBy(tokensOut, #tokensOut, "ident","first-letter", "colon", "!","colon") or
-			-- isPreceededBy(tokensOut, #tokensOut, "ident","first-line",   "colon", "!","colon")
-	end
+	end)
 
 	-- Put @charset first.
 	--------------------------------
 
 	local charset = nil
 
-	for i = #tokensOut-1, 1, -1 do
+	eachToken(tokensOut, #tokensOut-1, 1, -1, function(token, tokType, i)
 		if
 			tokensOut[i+1]
-			and tokensOut[i].type == "atKeyword" and tokensOut[i].value == "charset"
+			and tokType == "atKeyword" and token.value == "charset"
 			and tokensOut[i+1].type == "string"
 			and (not tokensOut[i+2] or tokensOut[i+2].type == "semicolon")
 		then
@@ -2017,7 +2344,7 @@ function css.minimize(tokensIn, options)
 				table.remove(tokensOut, i)
 			end
 		end
-	end
+	end)
 
 	if charset then
 		table.insert(tokensOut, 1, {type="atKeyword", value="charset"})
